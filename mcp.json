@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "promptguard": {
+      "command": "promptguard",
+      "args": ["mcp", "-t", "stdio"]
+    }
+  }
+}
