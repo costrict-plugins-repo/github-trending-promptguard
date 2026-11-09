@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# Tracked pre-push gate. Enable it once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# Two things, both fast: a secret scan of the commits being pushed, and
+# scripts/check.sh, the same command CI's validate job runs.
+# Both used to live in an untracked .git/hooks/pre-push on one laptop, which is
+# not a gate, it is a personal habit.
+set -euo pipefail
+
+# ~/.zshrc is zsh syntax and breaks when sourced from bash -- name the toolchain
+# paths it would have added instead. The newest installed nvm node is found,
+# not named: a pinned version directory breaks the hook on every node upgrade.
+nvm_bin=""
+if [ -d "$HOME/.nvm/versions/node" ]; then
+  nvm_bin=$(find "$HOME/.nvm/versions/node" -mindepth 2 -maxdepth 2 -name bin -type d | sort -V | tail -n 1)
+fi
+export PATH="$HOME/.cargo/bin:${nvm_bin:+$nvm_bin:}$HOME/Library/pnpm:$HOME/Library/pnpm/bin:/opt/homebrew/opt/python@3.13/bin:/opt/homebrew/opt/libpq/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$(git rev-parse --show-toplevel)"
+
+
+# A missing scanner fails the push: a gate that passes when its tool is absent
+# looks exactly like a clean scan. One-off override, written down per push:
+#   git -c promptguard.skipGitleaks=true push
+if ! command -v gitleaks >/dev/null 2>&1; then
+  if [ "$(git config --bool promptguard.skipGitleaks 2>/dev/null || echo false)" = "true" ]; then
+    echo "pre-push: gitleaks not installed; secret scan SKIPPED by promptguard.skipGitleaks." >&2
+  else
+    echo "pre-push: gitleaks is not installed, so the secret scan cannot run." >&2
+    echo "  brew install gitleaks    (or, once: git -c promptguard.skipGitleaks=true push)" >&2
+    exit 1
+  fi
+fi
+
+# Set by pre-commit at the pre-push stage. Falling back to "everything not yet
+# on a remote" covers a direct hook invocation and a brand-new branch alike.
+from_ref="${PRE_COMMIT_FROM_REF:-}"
+to_ref="${PRE_COMMIT_TO_REF:-}"
+if [ -n "$from_ref" ] && ! git rev-parse --quiet --verify "$from_ref" >/dev/null 2>&1; then
+  from_ref=""
+fi
+
+if [ -n "$from_ref" ] && [ -n "$to_ref" ]; then
+  log_opts="$from_ref..$to_ref"
+else
+  log_opts="HEAD --not --remotes"
+fi
+
+if ! gitleaks detect --source . --log-opts "$log_opts" --no-banner --redact; then
+  cat >&2 <<'MSG'
+
+A secret was found in the commits you are pushing.
+
+This repository is public. A credential that lands on the default branch is
+world-readable immediately and must be rotated, not just reverted.
+
+If this is a test fixture, do not bypass -- give it an obviously-fake shape, or
+add its path to .gitleaks.toml so the exemption is written down and reviewable.
+
+Bypass (last resort): git push --no-verify
+MSG
+  exit 1
+fi
+
+# Everything CI's validate job checks, from the one script both run.
+start=$(date +%s)
+bash scripts/check.sh
+echo "pre-push gate passed in $(( $(date +%s) - start ))s -- pushing."
